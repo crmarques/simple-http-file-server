@@ -24,9 +24,10 @@ ACCESS_TOKEN=${TOKEN} node app.js
 
 cd /tmp
 
-echo "test file" > file.txt
+echo "test file content" > file.txt
 
 curl -Ffile=@file.txt -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/upload
-
+# output: {"status":"ok"}
 curl -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/files/file.txt
+# output: test file content
 ```
