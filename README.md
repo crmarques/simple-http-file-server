@@ -17,7 +17,7 @@ Server behavior can be customized by the following environment variables:
 TOKEN=$(uuidgen)
 
 # docker
-docker run -d -p 3000:3000 --env ACCESS_TOKEN=${TOKEN} simple-http-file-server:0.0.1
+docker run -d -p 3000:3000 --env ACCESS_TOKEN=${TOKEN} crmarques/simple-http-file-server
 
 # shell
 ACCESS_TOKEN=${TOKEN} node app.js
