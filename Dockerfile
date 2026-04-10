@@ -1,19 +1,17 @@
-FROM node:25.9.0-bookworm-slim
+FROM registry.access.redhat.com/ubi10/nodejs-24-minimal:10.1
 
 ENV NODE_ENV=production
 ENV FILE_STORE_DIR=/tmp/simple-http-file-server
 
-WORKDIR /usr/src/app
+WORKDIR /opt/app-root/src
 
-RUN chown node:node /usr/src/app
+COPY --chown=1001:0 package*.json ./
 
-COPY --chown=node:node package*.json ./
-
-USER node
+USER 1001
 
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY --chown=node:node app.js ./
+COPY --chown=1001:0 app.js ./
 
 EXPOSE 3000
 CMD ["node", "app.js"]
