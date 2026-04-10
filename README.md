@@ -28,10 +28,12 @@ Server behavior can be customized by the following environment variables:
 | ACCESS_TOKEN | Randomly generated UUID token | Token used to authenticate to server. |
 | FILE_STORE_DIR | /tmp/simple-http-file-server | Directory where files will be stored. |
 | FILE_SIZE_LIMIT | 10485760 (10 MB) | Max file size in bytes. |
+| KEEP_FILENAME | false | When `true`, stores uploads using the original client filename. When `false`, stores uploads as `<uuid><original extension>`. |
+| FILE_STORED_PERMISSIONS | 600 | Octal permission mode applied to stored files. |
 
 `FILE_SIZE_LIMITE` is still accepted for backward compatibility.
 
-Uploaded files keep the exact filename provided by the client. The server rejects unsafe names such as paths (`../file.txt`, `dir/file.txt`, `dir\\file.txt`), control characters, and filenames longer than 255 UTF-8 bytes. Uploading a filename that already exists returns `409 Conflict` instead of overwriting the existing file.
+By default, uploaded files are stored as a randomized UUID filename while keeping the original extension when it fits safely. Set `KEEP_FILENAME=true` to preserve the exact filename provided by the client. The server rejects unsafe names such as paths (`../file.txt`, `dir/file.txt`, `dir\\file.txt`), control characters, and filenames longer than 255 UTF-8 bytes. When original filenames are preserved, uploading a filename that already exists returns `409 Conflict` instead of overwriting the existing file. Stored files are created with `0600` permissions by default, and `FILE_STORED_PERMISSIONS` accepts octal values such as `640` or `644`.
 
 ## Usage
 
@@ -56,7 +58,7 @@ cd /tmp
 echo "test file content" > file.txt
 
 curl -Ffile=@file.txt -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/upload
-# output: {"status":"ok","filename":"file.txt","url":"/files/file.txt"}
-curl -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/files/file.txt
+# output: {"status":"ok","filename":"<uuid>.txt","url":"/files/<uuid>.txt"}
+curl -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/files/<uuid>.txt
 # output: test file content
 ```

@@ -1,5 +1,5 @@
 const { mkdirSync } = require('node:fs');
-const { writeFile } = require('node:fs/promises');
+const { open } = require('node:fs/promises');
 const { randomUUID, timingSafeEqual } = require('node:crypto');
 const path = require('node:path');
 
@@ -10,12 +10,20 @@ const multer = require('multer');
 const DEFAULT_PORT = 3000;
 const DEFAULT_FILE_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_STORE_DIR = path.join('/tmp', 'simple-http-file-server');
+const DEFAULT_KEEP_FILENAME = false;
+const DEFAULT_FILE_STORED_PERMISSIONS = 0o600;
+const FILE_STORED_PERMISSIONS_PATTERN = /^[0-7]{3,4}$/;
 const MAX_FILENAME_BYTES = 255;
 
 function loadConfig(env = process.env) {
   const port = Number.parseInt(env.PORT ?? `${DEFAULT_PORT}`, 10);
   const token = env.ACCESS_TOKEN ?? randomUUID();
   const store = env.FILE_STORE_DIR ?? DEFAULT_STORE_DIR;
+  const keepFilename = parseBooleanEnv('KEEP_FILENAME', env.KEEP_FILENAME, DEFAULT_KEEP_FILENAME);
+  const storedPermissions = parseStoredPermissions(
+    env.FILE_STORED_PERMISSIONS,
+    DEFAULT_FILE_STORED_PERMISSIONS,
+  );
   const fileLimit = Number.parseInt(
     env.FILE_SIZE_LIMIT ?? env.FILE_SIZE_LIMITE ?? `${DEFAULT_FILE_LIMIT}`,
     10,
@@ -39,10 +47,44 @@ function loadConfig(env = process.env) {
 
   return {
     fileLimit,
+    keepFilename,
     port,
     store: path.resolve(store),
+    storedPermissions,
     token,
   };
+}
+
+function parseBooleanEnv(name, value, defaultValue) {
+  if (value === undefined) {
+    return defaultValue;
+  }
+
+  const normalizedValue = `${value}`.trim().toLowerCase();
+
+  if (normalizedValue === 'true') {
+    return true;
+  }
+
+  if (normalizedValue === 'false') {
+    return false;
+  }
+
+  throw new Error(`Invalid ${name} value: ${value}`);
+}
+
+function parseStoredPermissions(value, defaultValue) {
+  if (value === undefined) {
+    return defaultValue;
+  }
+
+  const normalizedValue = `${value}`.trim();
+
+  if (!FILE_STORED_PERMISSIONS_PATTERN.test(normalizedValue)) {
+    throw new Error(`Invalid FILE_STORED_PERMISSIONS value: ${value}`);
+  }
+
+  return Number.parseInt(normalizedValue, 8);
 }
 
 function createHttpError(statusCode, message) {
@@ -72,7 +114,7 @@ function validateUploadedFilename(originalName) {
   return originalName;
 }
 
-function buildStoredFilename(originalName) {
+function requireValidFilename(originalName) {
   const safeFilename = validateUploadedFilename(originalName);
 
   if (!safeFilename) {
@@ -80,6 +122,23 @@ function buildStoredFilename(originalName) {
   }
 
   return safeFilename;
+}
+
+function buildStoredFilename(originalName, { keepFilename = DEFAULT_KEEP_FILENAME } = {}) {
+  const safeFilename = requireValidFilename(originalName);
+
+  if (keepFilename) {
+    return safeFilename;
+  }
+
+  const extension = path.posix.extname(safeFilename);
+  const generatedFilename = `${randomUUID()}${extension}`;
+
+  if (Buffer.byteLength(generatedFilename, 'utf8') <= MAX_FILENAME_BYTES) {
+    return generatedFilename;
+  }
+
+  return randomUUID();
 }
 
 function isAuthorizedRequest(authorizationHeader, token) {
@@ -96,22 +155,37 @@ function isAuthorizedRequest(authorizationHeader, token) {
   );
 }
 
-async function writeUploadedFile(store, filename, buffer) {
+async function writeUploadedFile(
+  store,
+  filename,
+  buffer,
+  storedPermissions = DEFAULT_FILE_STORED_PERMISSIONS,
+) {
+  const filePath = path.join(store, filename);
+  let fileHandle;
+
   try {
-    await writeFile(path.join(store, filename), buffer, {
-      flag: 'wx',
-      mode: 0o600,
-    });
+    fileHandle = await open(filePath, 'wx', DEFAULT_FILE_STORED_PERMISSIONS);
+    await fileHandle.writeFile(buffer);
+    await fileHandle.chmod(storedPermissions);
   } catch (error) {
     if (error?.code === 'EEXIST') {
       throw createHttpError(409, 'A file with this name already exists.');
     }
 
     throw error;
+  } finally {
+    await fileHandle?.close();
   }
 }
 
-function createApp({ fileLimit, store, token }) {
+function createApp({
+  fileLimit,
+  keepFilename = DEFAULT_KEEP_FILENAME,
+  store,
+  storedPermissions = DEFAULT_FILE_STORED_PERMISSIONS,
+  token,
+}) {
   mkdirSync(store, { recursive: true, mode: 0o700 });
 
   const app = express();
@@ -135,7 +209,7 @@ function createApp({ fileLimit, store, token }) {
     let filename;
 
     try {
-      filename = buildStoredFilename(req.params.filename);
+      filename = requireValidFilename(req.params.filename);
     } catch (error) {
       next(error);
       return;
@@ -183,8 +257,8 @@ function createApp({ fileLimit, store, token }) {
       return;
     }
 
-    const filename = buildStoredFilename(req.file.originalname);
-    await writeUploadedFile(store, filename, req.file.buffer);
+    const filename = buildStoredFilename(req.file.originalname, { keepFilename });
+    await writeUploadedFile(store, filename, req.file.buffer, storedPermissions);
 
     res.status(201).json({
       status: 'ok',
