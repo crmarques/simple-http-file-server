@@ -5,6 +5,7 @@
 	"main": "app.js",
 	"scripts": {
 		"start": "node app.js",
+		"test": "node app.test.js",
 		"release:tag": "node -e \"const { readFileSync } = require('node:fs'); const { version } = JSON.parse(readFileSync('package.json', 'utf8')); process.stdout.write('v' + version + '\\n');\"",
 		"release:verify-tag": "node -e \"const { readFileSync } = require('node:fs'); const { version } = JSON.parse(readFileSync('package.json', 'utf8')); const releaseTag = process.env.RELEASE_TAG; if (!releaseTag) { console.error('RELEASE_TAG is required'); process.exit(1); } const expectedTag = 'v' + version; if (releaseTag !== expectedTag) { console.error('package.json version ' + version + ' does not match release tag ' + releaseTag); process.exit(1); } console.log('release tag ' + releaseTag + ' matches package.json version ' + version);\""
 	},

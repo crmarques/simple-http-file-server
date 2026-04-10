@@ -1,4 +1,5 @@
 const { mkdirSync } = require('node:fs');
+const { writeFile } = require('node:fs/promises');
 const { randomUUID, timingSafeEqual } = require('node:crypto');
 const path = require('node:path');
 
@@ -9,36 +10,40 @@ const multer = require('multer');
 const DEFAULT_PORT = 3000;
 const DEFAULT_FILE_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_STORE_DIR = path.join('/tmp', 'simple-http-file-server');
-const MAX_FILENAME_LENGTH = 128;
+const MAX_FILENAME_BYTES = 255;
 
-const port = Number.parseInt(process.env.PORT ?? `${DEFAULT_PORT}`, 10);
-const token = process.env.ACCESS_TOKEN ?? randomUUID();
-const store = process.env.FILE_STORE_DIR ?? DEFAULT_STORE_DIR;
-const fileLimit = Number.parseInt(
-  process.env.FILE_SIZE_LIMIT ?? process.env.FILE_SIZE_LIMITE ?? `${DEFAULT_FILE_LIMIT}`,
-  10,
-);
-
-if (!Number.isInteger(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: ${process.env.PORT}`);
-}
-
-if (!Number.isInteger(fileLimit) || fileLimit <= 0) {
-  throw new Error(
-    `Invalid FILE_SIZE_LIMIT value: ${process.env.FILE_SIZE_LIMIT ?? process.env.FILE_SIZE_LIMITE}`,
+function loadConfig(env = process.env) {
+  const port = Number.parseInt(env.PORT ?? `${DEFAULT_PORT}`, 10);
+  const token = env.ACCESS_TOKEN ?? randomUUID();
+  const store = env.FILE_STORE_DIR ?? DEFAULT_STORE_DIR;
+  const fileLimit = Number.parseInt(
+    env.FILE_SIZE_LIMIT ?? env.FILE_SIZE_LIMITE ?? `${DEFAULT_FILE_LIMIT}`,
+    10,
   );
-}
 
-if (token.trim().length === 0) {
-  throw new Error('ACCESS_TOKEN must not be empty.');
-}
+  if (!Number.isInteger(port) || port <= 0) {
+    throw new Error(`Invalid PORT value: ${env.PORT}`);
+  }
 
-if (!process.env.ACCESS_TOKEN) {
-  console.log(`Self-generated access token: ${token}`);
-}
+  if (!Number.isInteger(fileLimit) || fileLimit <= 0) {
+    throw new Error(`Invalid FILE_SIZE_LIMIT value: ${env.FILE_SIZE_LIMIT ?? env.FILE_SIZE_LIMITE}`);
+  }
 
-const normalizedStore = path.resolve(store);
-mkdirSync(normalizedStore, { recursive: true, mode: 0o700 });
+  if (token.trim().length === 0) {
+    throw new Error('ACCESS_TOKEN must not be empty.');
+  }
+
+  if (!env.ACCESS_TOKEN) {
+    console.log(`Self-generated access token: ${token}`);
+  }
+
+  return {
+    fileLimit,
+    port,
+    store: path.resolve(store),
+    token,
+  };
+}
 
 function createHttpError(statusCode, message) {
   const error = new Error(message);
@@ -46,37 +51,38 @@ function createHttpError(statusCode, message) {
   return error;
 }
 
-function sanitizeUploadedFilename(originalName) {
-  const normalizedName = String(originalName ?? '').replace(/\\/g, '/');
-  const baseName = path.posix.basename(normalizedName).trim();
-  const sanitizedName = baseName
-    .replace(/[\u0000-\u001f\u007f]/g, '')
-    .replace(/[^A-Za-z0-9._-]/g, '_')
-    .slice(0, MAX_FILENAME_LENGTH);
+function validateUploadedFilename(originalName) {
+  if (typeof originalName !== 'string' || originalName.length === 0) {
+    return null;
+  }
+
+  if (path.posix.basename(originalName.replace(/\\/g, '/')) !== originalName) {
+    return null;
+  }
 
   if (
-    sanitizedName.length === 0 ||
-    sanitizedName === '.' ||
-    sanitizedName === '..' ||
-    sanitizedName.startsWith('.')
+    originalName === '.' ||
+    originalName === '..' ||
+    /[\u0000-\u001f\u007f]/.test(originalName) ||
+    Buffer.byteLength(originalName, 'utf8') > MAX_FILENAME_BYTES
   ) {
     return null;
   }
 
-  return sanitizedName;
+  return originalName;
 }
 
 function buildStoredFilename(originalName) {
-  const safeFilename = sanitizeUploadedFilename(originalName);
+  const safeFilename = validateUploadedFilename(originalName);
 
   if (!safeFilename) {
     throw createHttpError(400, 'Invalid file name.');
   }
 
-  return `${randomUUID()}-${safeFilename}`;
+  return safeFilename;
 }
 
-function isAuthorizedRequest(authorizationHeader) {
+function isAuthorizedRequest(authorizationHeader, token) {
   if (typeof authorizationHeader !== 'string' || !authorizationHeader.startsWith('Bearer ')) {
     return false;
   }
@@ -90,108 +96,152 @@ function isAuthorizedRequest(authorizationHeader) {
   );
 }
 
-function getDownloadFilename(filePath) {
-  return path.basename(filePath).replace(/["\\\r\n]/g, '_');
+async function writeUploadedFile(store, filename, buffer) {
+  try {
+    await writeFile(path.join(store, filename), buffer, {
+      flag: 'wx',
+      mode: 0o600,
+    });
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      throw createHttpError(409, 'A file with this name already exists.');
+    }
+
+    throw error;
+  }
 }
 
-const app = express();
-app.disable('x-powered-by');
+function createApp({ fileLimit, store, token }) {
+  mkdirSync(store, { recursive: true, mode: 0o700 });
 
-app.use(helmet());
-app.use((req, res, next) => {
-  if (isAuthorizedRequest(req.headers.authorization)) {
-    next();
-    return;
-  }
+  const app = express();
+  app.disable('x-powered-by');
 
-  res.sendStatus(403);
-});
+  app.use(helmet());
+  app.use((req, res, next) => {
+    if (isAuthorizedRequest(req.headers.authorization, token)) {
+      next();
+      return;
+    }
 
-app.get('/', (req, res) => {
-  res.send('Welcome to simple http file server!');
-});
-
-app.use(
-  '/files',
-  express.static(normalizedStore, {
-    dotfiles: 'deny',
-    fallthrough: false,
-    index: false,
-    redirect: false,
-    setHeaders(res, filePath) {
-      res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('Content-Disposition', `attachment; filename="${getDownloadFilename(filePath)}"`);
-    },
-  }),
-);
-
-const upload = multer({
-  storage: multer.diskStorage({
-    destination(req, file, cb) {
-      cb(null, normalizedStore);
-    },
-    filename(req, file, cb) {
-      try {
-        cb(null, buildStoredFilename(file.originalname));
-      } catch (error) {
-        cb(error);
-      }
-    },
-  }),
-  limits: {
-    fileSize: fileLimit,
-    files: 1,
-    fields: 0,
-    headerPairs: 20,
-  },
-});
-
-app.post('/upload', upload.single('file'), (req, res) => {
-  if (!req.file) {
-    res.status(400).json({
-      status: 'error',
-      message: 'Error saving file.',
-    });
-    return;
-  }
-
-  res.status(201).json({
-    status: 'ok',
-    filename: req.file.filename,
-    url: `/files/${encodeURIComponent(req.file.filename)}`,
+    res.sendStatus(403);
   });
-});
 
-app.use((error, req, res, next) => {
-  if (res.headersSent) {
-    next(error);
-    return;
-  }
-
-  if (error instanceof multer.MulterError) {
-    res.status(400).json({
-      status: 'error',
-      message: error.message,
-    });
-    return;
-  }
-
-  if (error?.statusCode) {
-    res.status(error.statusCode).json({
-      status: 'error',
-      message: error.message,
-    });
-    return;
-  }
-
-  console.error(error);
-
-  res.status(500).json({
-    status: 'error',
-    message: 'Internal server error.',
+  app.get('/', (req, res) => {
+    res.send('Welcome to simple http file server!');
   });
-});
 
-app.listen(port, () => {
-  console.log(`Server listening at http://localhost:${port}`);
-});
+  app.get('/files/:filename', (req, res, next) => {
+    let filename;
+
+    try {
+      filename = buildStoredFilename(req.params.filename);
+    } catch (error) {
+      next(error);
+      return;
+    }
+
+    res.download(
+      filename,
+      filename,
+      {
+        root: store,
+        dotfiles: 'allow',
+        headers: {
+          'Cache-Control': 'no-store',
+        },
+      },
+      (error) => {
+        if (error) {
+          if (error.code === 'ENOENT') {
+            next(createHttpError(404, 'File not found.'));
+            return;
+          }
+
+          next(error);
+        }
+      },
+    );
+  });
+
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: fileLimit,
+      files: 1,
+      fields: 0,
+      headerPairs: 20,
+    },
+  });
+
+  app.post('/upload', upload.single('file'), async (req, res) => {
+    if (!req.file) {
+      res.status(400).json({
+        status: 'error',
+        message: 'Error saving file.',
+      });
+      return;
+    }
+
+    const filename = buildStoredFilename(req.file.originalname);
+    await writeUploadedFile(store, filename, req.file.buffer);
+
+    res.status(201).json({
+      status: 'ok',
+      filename,
+      url: `/files/${encodeURIComponent(filename)}`,
+    });
+  });
+
+  app.use((error, req, res, next) => {
+    if (res.headersSent) {
+      next(error);
+      return;
+    }
+
+    if (error instanceof multer.MulterError) {
+      res.status(400).json({
+        status: 'error',
+        message: error.message,
+      });
+      return;
+    }
+
+    if (error?.statusCode) {
+      res.status(error.statusCode).json({
+        status: 'error',
+        message: error.message,
+      });
+      return;
+    }
+
+    console.error(error);
+
+    res.status(500).json({
+      status: 'error',
+      message: 'Internal server error.',
+    });
+  });
+
+  return app;
+}
+
+function startServer(config = loadConfig()) {
+  const app = createApp(config);
+  return app.listen(config.port, () => {
+    console.log(`Server listening at http://localhost:${config.port}`);
+  });
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = {
+  buildStoredFilename,
+  createApp,
+  loadConfig,
+  startServer,
+  validateUploadedFilename,
+  writeUploadedFile,
+};

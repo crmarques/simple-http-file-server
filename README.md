@@ -31,6 +31,8 @@ Server behavior can be customized by the following environment variables:
 
 `FILE_SIZE_LIMITE` is still accepted for backward compatibility.
 
+Uploaded files keep the exact filename provided by the client. The server rejects unsafe names such as paths (`../file.txt`, `dir/file.txt`, `dir\\file.txt`), control characters, and filenames longer than 255 UTF-8 bytes. Uploading a filename that already exists returns `409 Conflict` instead of overwriting the existing file.
+
 ## Usage
 
 ```bash
@@ -54,7 +56,7 @@ cd /tmp
 echo "test file content" > file.txt
 
 curl -Ffile=@file.txt -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/upload
-# output: {"status":"ok","filename":"<generated>-file.txt","url":"/files/<generated>-file.txt"}
-curl -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/files/<generated>-file.txt
+# output: {"status":"ok","filename":"file.txt","url":"/files/file.txt"}
+curl -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/files/file.txt
 # output: test file content
 ```
