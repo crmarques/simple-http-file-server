@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi10/nodejs-24-minimal:10.1
+FROM registry.access.redhat.com/ubi10/nodejs-24-minimal:10.1-1776103570
 
 ENV NODE_ENV=production
 ENV FILE_STORE_DIR=/tmp/simple-http-file-server
